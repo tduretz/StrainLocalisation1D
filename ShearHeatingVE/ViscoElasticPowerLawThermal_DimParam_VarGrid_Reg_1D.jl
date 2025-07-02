@@ -1,18 +1,16 @@
 using Plots, LinearAlgebra, Statistics, StaticArrays, BackwardDifferenceFormula
 
-@views function ViscoElastic_CrankNicolson(;θM=1.0, θT=1.0, nres=1, adapt_dt=false, viz=false)
+@views function ViscoElastic_CrankNicolson(;θM=1.0, θT=1.0, nresy=1, nrest=1, adapt_dy=false, adapt_dt=false, viz=false, noisy=false)
 
     CFL_M    = 0.5
     CFL_T    = 0.5
     c_fact   = 1.8 # Damping
     rel      = 0.5
-    bdf      = 1   # if 0 then NO BDF is used (CN or BE depending on θM, θT) 
+    bdf      = 4   # if 0 then NO BDF is used (CN or BE depending on θM, θT) 
     debug    = false
     nitermax = 3e5
-    nresmax  = 32
+    nresmax  = 128
     spY      = 3600*24*365.25
-
-    mesh_refinement = true
 
     # Scales
     sc = (L=1e3, t=1e7, σ=1e6, T=1000)
@@ -28,14 +26,13 @@ using Plots, LinearAlgebra, Statistics, StaticArrays, BackwardDifferenceFormula
     t_end  = 600*spY  / sc.t
     ε̇      = 4e-13    * sc.t
     H_R    = 63748.0  / sc.T
-    η_reg  = 1e15     / sc.σ / sc.t
+    η_reg  = 1e16     / sc.σ / sc.t
     τ0     = 1e9      / sc.σ
     Tini   = 973.15   / sc.T
     C0     = 1.1e-16  / (sc.σ^(-n)/sc.t) #Pa^-ndis s^-1
     k      = 3.0      / (W/sc.L/sc.T) 
     ρ      = 3469.0   / (m/sc.L^3)
     cp     = 1000.0   / (J/m/sc.T)
- 
     Nt     = 6000*nresmax
     ε̇0     = abs(ε̇)
    
@@ -44,26 +41,25 @@ using Plots, LinearAlgebra, Statistics, StaticArrays, BackwardDifferenceFormula
     hL     = 0.02
     η0     = 0.5 * C0^(-1.0/n) * ε̇0^(1.0/n - 1.0) * exp(H_R/(n*Tini))
     y      = (min = -L/2, max   = L/2)
-    ncy    = 100
+    ncy    = 100*nresy
 
     # time stepping
     if adapt_dt # adaptive
         Δt_max = Δt_ref / 2.0
-        Δt_min = Δt_ref / 64.0
+        Δt_min = Δt_ref / 128.0
         dT_ref = 10.0   / sc.T
         dτ_ref = 50e6   / sc.σ
         Δt     = copy(Δt_ref)
     else
-        Δt     = Δt_ref/nresmax
+        Δt     = Δt_ref/nrest
         Nt     = Int64(ceil(t_end/Δt))
     end
     println("Timestep: $(Δt/spY) yr")
 
     # 1D
-    if mesh_refinement
+    if adapt_dy
         y0     = (y.max + y.min)/2
-        σy     = 0.5                  # the larger, the finer the grid
-        Δy0    = (y.max - y.min) / ncy
+        σy     = 0.5*(nresy)^(1/3)                 # the larger, the finer the grid
         yv0    = LinRange(y.min, y.max, ncy+1) 
         ymin1  = (sinh.( σy.*(yv0[1]  .-y0) ))
         ymax1  = (sinh.( σy.*(yv0[end].-y0) ))
@@ -73,6 +69,7 @@ using Plots, LinearAlgebra, Statistics, StaticArrays, BackwardDifferenceFormula
         yc     = 0.5*(yv[1:end-1] .+ yv[2:end])
         yce    = zeros(ncy+2); yce[2:end-1] .= yc; yce[1] = yv[1]-Δy_c[1]/2; yce[end] = yv[end]+Δy_c[end]/2
         Δy_v   = diff(yce)
+        ncy_eq = Int64(ceil((y.max - y.min) / minimum(Δy_c)))
         # display(plot(yc0, log10.(Δy_c./Δy_c[1])))
         # display(scatter(yv[2:end-1], max.(Δy_c[1:end-1], Δy_c[2:end])./min.(Δy_c[1:end-1], Δy_c[2:end]), title="ratio"))
         # error()
@@ -83,6 +80,7 @@ using Plots, LinearAlgebra, Statistics, StaticArrays, BackwardDifferenceFormula
         yce     = LinRange(y.min-Δy/2, y.max+Δy/2, ncy+2) 
         Δy_c    = Δy*ones(ncy)
         Δy_v    = Δy*ones(ncy+1)
+        ncy_eq  = ncy
     end
 
     Vx      = zeros(ncy+2)
@@ -108,11 +106,9 @@ using Plots, LinearAlgebra, Statistics, StaticArrays, BackwardDifferenceFormula
     T000    = zeros(ncy+2)
     T0000   = zeros(ncy+2)
     Hs      = zeros(ncy+0)
-    ε̇II_v   = zeros(ncy+1) 
     τII     =1*ones(ncy+1) 
     ηv      =  ones(ncy+1) 
     ηv_true =  ones(ncy+1) 
-    ηv_dis  =  ones(ncy+1)
     RT      = zeros(ncy+2)
     RT0     = zeros(ncy+2)
     ∂T∂τ    = zeros(ncy+2)
@@ -150,10 +146,6 @@ using Plots, LinearAlgebra, Statistics, StaticArrays, BackwardDifferenceFormula
     Δt0, Δt00 = Δt, Δt
     it = 0
     t  = 0.
-
-    # Scaling for residual
-    Tscal = Tini
-    Vscal = maximum(Vx) - minimum(Vx)
 
     # Max number of time steps
     nitmax = debug ? 2 : 1e4
@@ -243,7 +235,7 @@ using Plots, LinearAlgebra, Statistics, StaticArrays, BackwardDifferenceFormula
         βT    = 2ΔτT^2 / (2 + cT*ΔτT)
 
         nRx0, nRT0 = 1.0, 1.0
-        tol        = 1e-8
+        tol        = 1e-5
 
         for iter=1:nitermax
 
@@ -262,13 +254,13 @@ using Plots, LinearAlgebra, Statistics, StaticArrays, BackwardDifferenceFormula
             # ηv_dis      .= exp.( rel.*log.(ηv_true) .+ (1-rel).*log.(ηv_dis))
             # ηv          .= ηv_dis .+ η_reg
             η_ve        .= (1 ./ ηv .+ 1 ./ ηe).^(-1)
-            # # Vx[1]        = 2*ε̇0*yv[1]   - Vx[2]
-            # # Vx[end]      = 2*ε̇0*yv[end] - Vx[end-1]
-            # # ε̇xy         .= (Vx[2:end] .- Vx[1:end-1])./Δy_v
-            # # Tv          .= 0.5.*(T[2:end] .+ T[1:end-1])
-            # # ηv_true     .= 0.5.*C.^(-1).*τII.^(1-n).*exp.(H_R./Tv)
-            # # ηv          .= exp.( rel.*log.(ηv_true) .+ (1-rel).*log.(ηv))
-            # # η_ve        .= (1 ./ ηv .+ 1 ./ ηe).^(-1)
+            # # # Vx[1]        = 2*ε̇0*yv[1]   - Vx[2]
+            # # # Vx[end]      = 2*ε̇0*yv[end] - Vx[end-1]
+            # # # ε̇xy         .= (Vx[2:end] .- Vx[1:end-1])./Δy_v
+            # # # Tv          .= 0.5.*(T[2:end] .+ T[1:end-1])
+            # # # ηv_true     .= 0.5.*C.^(-1).*τII.^(1-n).*exp.(H_R./Tv)
+            # # # ηv          .= exp.( rel.*log.(ηv_true) .+ (1-rel).*log.(ηv))
+            # # # η_ve        .= (1 ./ ηv .+ 1 ./ ηe).^(-1)
             if bdf==0
                 a_ve        .= (1-θM) .* ηv.*Δt./(ηv .+ ηe)
                 ε̇xy_ve      .= ε̇xy .+ τxy0./(2 .* ηe)
@@ -294,15 +286,15 @@ using Plots, LinearAlgebra, Statistics, StaticArrays, BackwardDifferenceFormula
             T          .+= βT.*∂T∂τ
 
             if iter==1 || mod(iter, 100)==0
-                errV = norm(Rx)
-                errT = norm(RT)
-                #@show it, iter, norm(errV), norm(errT)
-                if iter==1 nRx0, nRT0 = norm(errV)/ncy, norm(errT)/ncy end
-                isnan(norm(errV)) && error("NaN @ it = $(iter)")
-                if (norm(errT)<tol || norm(errT)/nRT0<tol) ## && (norm(errV)<1e-6 || norm(errV)/nRx0<1e-6)
-                    err.T[it] = min(norm(errT), norm(errT)/nRT0)
-                    err.V[it] = min(norm(errV), norm(errV)/nRx0)
-                    println("$(iter), $(iter/ncy), $(Δt)")
+                if iter==1 nRx0, nRT0 = norm(Rx)/ncy, norm(RT)/ncy end
+                errV = max(norm(Rx)/ncy_eq, norm(Rx)/ncy_eq/nRx0)
+                errT = max(norm(RT)/ncy_eq, norm(RT)/ncy_eq/nRT0)
+                # @show it, iter, errV, errT
+                isnan(errV) && error("NaN @ it = $(iter)")
+                if (errT<tol)  && (errV<tol)
+                    err.T[it] = errV
+                    err.V[it] = errT
+                    noisy ? println("$(iter), $(iter/ncy), $(Δt)") : nothing
                     break
                 end
                 # PT params 2
@@ -330,7 +322,7 @@ using Plots, LinearAlgebra, Statistics, StaticArrays, BackwardDifferenceFormula
         τvec[it]        = mean(τII)
         probes.vmax[it] = maximum(Vx)/abs(ε̇0*yv[end])
     
-        if mod(it, 10)==0 && viz
+        if (mod(it, 200)==0 || it==Nt || it==nitmax) && viz
             # Visualise
             p1 = plot(legend=:bottomright)
             p1 = plot!(tvec[1:it] .* sc.t ./ spY, τvec[1:it] .* sc.σ ./ 1e6)
@@ -350,7 +342,9 @@ using Plots, LinearAlgebra, Statistics, StaticArrays, BackwardDifferenceFormula
     @info vmax
     @info tvec[imax]
     @info twall
-    return vmax, tvec[imax], minimum(log10.(Δtvec[1:it])), maximum(log10.(Δtvec[1:it])), twall 
+    dt_vals = (minimum((Δtvec[1:it])), maximum((Δtvec[1:it])))
+    dx_vals = (minimum((Δy_c)), maximum((Δy_c)))
+    return vmax, tvec[imax], twall, dt_vals, dx_vals 
 end
  
 # let
@@ -372,7 +366,7 @@ end
 # end
 
 
-ViscoElastic_CrankNicolson(;θM=1.0, θT=1.0, nres=1, adapt_dt=true, viz=true)
+ViscoElastic_CrankNicolson(;θM=1.0, θT=1.0, nresy=1, nrest=1, adapt_dy=true, adapt_dt=true, viz=true, noisy=false)
 
 # v = [119.61046691382055, 76.78011622622239, 76.14098484053791, 76.15711043461168, 76.17197880423882]
 # t = [14.944999999999169, 14.95875000000304, 14.959374999995456, 14.959374999990926, 14.959218749988661]
