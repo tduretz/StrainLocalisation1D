@@ -1,4 +1,4 @@
-using Plots, LinearAlgebra, Statistics, StaticArrays, BackwardDifferenceFormula
+using Plots, LinearAlgebra, Statistics, StaticArrays, BackwardDifferenceFormula, JLD2
 
 @views function ViscoElastic_CrankNicolson(;θM=1.0, θT=1.0, nresy=1, nrest=1, adapt_dy=false, adapt_dt=false, viz=false, noisy=false)
 
@@ -41,7 +41,7 @@ using Plots, LinearAlgebra, Statistics, StaticArrays, BackwardDifferenceFormula
     hL     = 0.02
     η0     = 0.5 * C0^(-1.0/n) * ε̇0^(1.0/n - 1.0) * exp(H_R/(n*Tini))
     y      = (min = -L/2, max   = L/2)
-    ncy    = 100*nresy
+    ncy    = 100*nresy+1
 
     # time stepping
     if adapt_dt # adaptive
@@ -54,7 +54,6 @@ using Plots, LinearAlgebra, Statistics, StaticArrays, BackwardDifferenceFormula
         Δt     = Δt_ref/nrest
         Nt     = Int64(ceil(t_end/Δt))
     end
-    println("Timestep: $(Δt/spY) yr")
 
     # 1D
     if adapt_dy
@@ -140,7 +139,7 @@ using Plots, LinearAlgebra, Statistics, StaticArrays, BackwardDifferenceFormula
     τvec_ana = zeros(Nt)
     τvec     = zeros(Nt)
     err      = (T = zeros(Nt), V = zeros(Nt))
-    probes   = (vmax=zeros(Nt),)
+    probes   = (vmax=zeros(Nt), Tmax=zeros(Nt), szw=zeros(Int64, Nt),)
 
     a, b, c, d, e = 0.0, 0.0, 0.0, 0.0, 0.0
     Δt0, Δt00 = Δt, Δt
@@ -148,7 +147,7 @@ using Plots, LinearAlgebra, Statistics, StaticArrays, BackwardDifferenceFormula
     t  = 0.
 
     # Max number of time steps
-    nitmax = debug ? 2 : 1e5
+    nitmax = debug ? 2 : 1e4
 
     # Time integration
     @time twall = @elapsed while t < t_end && it<nitmax
@@ -287,16 +286,14 @@ using Plots, LinearAlgebra, Statistics, StaticArrays, BackwardDifferenceFormula
 
             if iter==1 || mod(iter, 100)==0
                 if iter==1 nRx0, nRT0 = norm(Rx)/ncy_eq, norm(RT)/ncy_eq end
-                # errV = min(norm(Rx)/ncy_eq, norm(Rx)/ncy_eq/nRx0)
-                # errT = min(norm(RT)/ncy_eq, norm(RT)/ncy_eq/nRT0)
-                errV = max(norm(Rx)/ncy_eq, norm(Rx)/ncy_eq/nRx0)
-                errT = max(norm(RT)/ncy_eq, norm(RT)/ncy_eq/nRT0)
+                errV = min(norm(Rx)/ncy_eq, norm(Rx)/ncy_eq/nRx0)
+                errT = min(norm(RT)/ncy_eq, norm(RT)/ncy_eq/nRT0)
                 if mod(iter, 1000)==0 
-                     @show it, iter, errV, errT 
-                end
-                isnan(errV) && error("NaN @ it = $(iter)")
-                stopping = (errT<tol)  && (errV<tol)
-                if stopping
+                    @show it, iter, errV, errT 
+               end
+               isnan(errV) && error("NaN @ it = $(iter)")
+               stopping = (errT<tol)  && (errV<tol)
+               if stopping
                     err.T[it] = errV
                     err.V[it] = errT
                     noisy ? println("$(iter), $(iter/ncy), $(Δt)") : nothing
@@ -331,9 +328,14 @@ using Plots, LinearAlgebra, Statistics, StaticArrays, BackwardDifferenceFormula
         τvec_ana[it]    = 2η0*ε̇*(1 .- exp.(-G/η0.*t))
         τvec[it]        = mean(τII)
         probes.vmax[it] = maximum(Vx)/abs(ε̇0*yv[end])
-    
+        probes.Tmax[it] = maximum(T)/Tini
+        probes.szw[it]  = argmax(Vx) - argmin(Vx)
+
+        # print shear zone width
+        #println("Cells in shear zone: $(argmax(Vx)-argmin(Vx))")
+
         vstep = 100
-        if (mod(it, vstep)==0 || it==Nt || it==nitmax) && viz
+        if (mod(it, 200)==0 || it==Nt || it==nitmax) && viz
             # Visualise
             p1 = plot(legend=:bottomright)
             p1 = plot!(tvec[1:vstep:it] .* sc.t ./ spY, τvec[1:vstep:it] .* sc.σ ./ 1e6)
@@ -348,6 +350,10 @@ using Plots, LinearAlgebra, Statistics, StaticArrays, BackwardDifferenceFormula
             p6 = plot(yc, log10.(Δy_c./Δy_c[1]), label = "Δy")
             display(plot(p1,p2,p3,p4,p5,p6, layout=(3, 2)))
         end
+
+	if mod(it, 1000) == 0
+	    jldsave("AdaptStep.jld2"; evo=probes, τ=τvec, t=tvec, Δt=Δtvec)
+	end
     end 
     vmax,imax = findmax(probes.vmax) 
     @info vmax
@@ -355,80 +361,8 @@ using Plots, LinearAlgebra, Statistics, StaticArrays, BackwardDifferenceFormula
     @info twall
     dt_vals = (minimum((Δtvec[1:it])), maximum((Δtvec[1:it])))
     dx_vals = (minimum((Δy_c)), maximum((Δy_c)))
+    jldsave("AdaptStep.jld2"; evo=probes, τ=τvec, t=tvec, Δt=Δtvec)
     return vmax, tvec[imax], twall, dt_vals, dx_vals 
 end
- 
-# let
-#     # n = [2 4 8 16 32]
-#     n = [64]
-#     v     = zeros(length(n))
-#     t     = zeros(length(n))
-#     dtmin = zeros(length(n))
-#     dtmax = zeros(length(n))
-   
-#     for ires in eachindex(n)
-#         @show n[ires]
-#         v[ires], t[ires], dtmin[ires], dtmax[ires] = ViscoElastic_CrankNicolson(;θM=1/2, θT=1/2, nres=n[ires], adapt_dt=false, viz=false)
-#     end
-#     @show v
-#     @show t
-#     @show dtmin
-#     @show dtmax
-# end
 
-
-# ViscoElastic_CrankNicolson(;θM=1.0, θT=1.0, nresy=1, nrest=1, adapt_dy=true, adapt_dt=true, viz=true, noisy=true)
-ViscoElastic_CrankNicolson(;θM=1.0, θT=1.0, nresy=32, nrest=128, adapt_dy=false, adapt_dt=true, viz=true, noisy=true);
-
-# v = [119.61046691382055, 76.78011622622239, 76.14098484053791, 76.15711043461168, 76.17197880423882]
-# t = [14.944999999999169, 14.95875000000304, 14.959374999995456, 14.959374999990926, 14.959218749988661]
-# dtmin = [0.0025, 0.00125, 0.000625, 0.0003125, 0.00015625]
-# dtmax = [0.0025, 0.00125, 0.000625, 0.0003125, 0.00015625]
-
-
-# # tougher (rho=5)
-# v = [204.52516689855722, 155.96885327473433, 140.9638203888602, 136.36902800372212, 134.11591522309152]
-# t = [20.600000000001312, 20.616249999999372, 20.623124999990306, 20.626249999985774, 20.627968749983506]
-# dtmin = [0.0025, 0.00125, 0.000625, 0.0003125, 0.00015625]
-# dtmax = [0.0025, 0.00125, 0.000625, 0.0003125, 0.00015625]
-# Adapt
-# [ Info: 134.00921452749344
-# [ Info: 20.623782224164753
-# (134.00921452749344, 20.623782224164753, 0.00015625, 0.005)
-
-
-# Tougher 2: ρ      = 90.0
-# n[ires] = 2
-# [ Info: 353.26600619557814
-# [ Info: 36.745000000002825
-# [ Info: 76.563806334
-# n[ires] = 4
-# [ Info: 335.32053921912154
-# [ Info: 36.7549999999847
-# [ Info: 133.376973375
-# n[ires] = 8
-# [ Info: 328.8749764527673
-# [ Info: 36.759374999975634
-# [ Info: 238.71558325
-# n[ires] = 16
-# [ Info: 325.8475035241317
-# [ Info: 36.7618749999711
-# [ Info: 371.055890625
-# n[ires] = 32
-# [ Info: 324.34702621873
-# [ Info: 36.76312500007713
-# [ Info: 278.030052541
-# n[ires] = 64
-# 306.746844 seconds
-# [ Info: 323.593683036392
-# [ Info: 36.763750000439806
-# [ Info: 306.746843459
-# Adapt 32
-# [ Info: 324.1710873602131
-# [ Info: 36.75833708002466
-# [ Info: 339.209569459
-# Adapt 64
-# [ Info: 323.4110038456593
-# [ Info: 36.758670603675
-# [ Info: 82.90927225
-# (324.1710873602131, 36.75833708002466, 0.00015625, 0.005, 339.209569459)
+ViscoElastic_CrankNicolson(;θM=1.0, θT=1.0, nresy=32, nrest=1, adapt_dy=false, adapt_dt=true, viz=true, noisy=true)
